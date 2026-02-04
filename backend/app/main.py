@@ -229,7 +229,7 @@ async def export_to_excel(
     request: ExportRequest,
     _: dict = Depends(verify_token)
 ):
-    """Export passport data to Excel file."""
+    """Export passport data to Excel file in Thai immigration format."""
     # Create workbook
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -238,7 +238,7 @@ async def export_to_excel(
     # Define styles
     header_font = Font(bold=True, color="FFFFFF")
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-    header_alignment = Alignment(horizontal="center", vertical="center")
+    header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     thin_border = Border(
         left=Side(style='thin'),
         right=Side(style='thin'),
@@ -246,11 +246,17 @@ async def export_to_excel(
         bottom=Side(style='thin')
     )
 
-    # Headers
+    # Thai immigration template headers
     headers = [
-        "First Name", "Middle Name", "Last Name", "Gender",
-        "Date of Birth", "Nationality", "Passport Number",
-        "Checkout Date", "Phone Number"
+        "ชื่อ\nFirst Name *",
+        "ชื่อกลาง\nMiddle Name",
+        "นามสกุล\nLast Name",
+        "เพศ\nGender *",
+        "เลขหนังสือเดินทาง\nPassport No. *",
+        "สัญชาติ\nNationality *",
+        "วัน เดือน ปี เกิด\nBirth Date\nDD/MM/YYYY(ค.ศ. / A.D.) \nเช่น 17/06/1985 หรือ 10/00/1985 หรือ 00/00/1985",
+        "วันที่แจ้งออกจากที่พัก\nCheck-out Date\nDD/MM/YYYY(ค.ศ. / A.D.) \nเช่น 14/06/2023",
+        "เบอร์โทรศัพท์\nPhone No."
     ]
 
     for col, header in enumerate(headers, 1):
@@ -260,26 +266,36 @@ async def export_to_excel(
         cell.alignment = header_alignment
         cell.border = thin_border
 
+    # Set header row height to accommodate multi-line headers
+    ws.row_dimensions[1].height = 80
+
     # Data rows
     for row, passport in enumerate(request.passports, 2):
+        # Convert gender to Thai format
+        gender_thai = ""
+        if passport.gender == "M":
+            gender_thai = "ชาย"
+        elif passport.gender == "F":
+            gender_thai = "หญิง"
+
         data = [
             passport.first_name,
             passport.middle_name,
             passport.last_name,
-            passport.gender,
-            passport.date_of_birth,
-            passport.nationality,
+            gender_thai,
             passport.passport_number,
-            "",  # Checkout Date - leave empty
-            ""   # Phone Number - leave empty
+            passport.nationality,
+            passport.date_of_birth,
+            "",  # Check-out Date - leave empty
+            ""   # Phone No. - leave empty
         ]
         for col, value in enumerate(data, 1):
             cell = ws.cell(row=row, column=col, value=value)
             cell.border = thin_border
             cell.alignment = Alignment(horizontal="left", vertical="center")
 
-    # Adjust column widths
-    column_widths = [15, 15, 20, 10, 15, 15, 18, 15, 15]
+    # Adjust column widths for Thai immigration template
+    column_widths = [18, 15, 20, 12, 20, 15, 25, 25, 18]
     for col, width in enumerate(column_widths, 1):
         ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = width
 
