@@ -314,7 +314,7 @@ def parse_mrz_names(names_section: str) -> Tuple[str, str, str, List[str]]:
     - TAMAS = middle name
 
     Example: ROTARI<DOANI<<OLGA<<<<<<<<<<<<<<<<<<
-    - ROTARI<DOANI = last name (single < = hyphen, so ROTARI-DOANI)
+    - ROTARI<DOANI = last name (single < = space, so ROTARI DOANI)
     - OLGA = first name
     """
     logger.info(f"Parsing names from: '{names_section}'")
@@ -704,7 +704,11 @@ def extract_fields_from_text(text: str) -> Optional[PassportData]:
     last_name = find_value_after_label(surname_patterns, lines)
     # Clean: remove any label text and non-alpha characters
     last_name = re.sub(r'(?:SURNAME|FAMILY\s*NAME|NOM|NUMELE|/.*)', '', last_name, flags=re.IGNORECASE).strip()
-    last_name = re.sub(r'[^A-Za-z\s\-]', '', last_name).strip().upper()
+    # Replace hyphens with spaces for compound names
+    last_name = last_name.replace('-', ' ')
+    last_name = re.sub(r'[^A-Za-z\s]', '', last_name).strip().upper()
+    # Clean up multiple spaces
+    last_name = re.sub(r' +', ' ', last_name)
     # Take only the first word if multiple
     if last_name and ' ' in last_name:
         parts = last_name.split()
@@ -782,7 +786,11 @@ def extract_fields_from_text(text: str) -> Optional[PassportData]:
             break
 
     given_names = re.sub(r'(?:GIVEN\s*NAME|FIRST\s*NAME|FORENAME|PRENUMELE|PR[EÉ]NOM|/.*)', '', given_names, flags=re.IGNORECASE).strip()
-    given_names = re.sub(r'[^A-Za-z\s\-]', '', given_names).strip().upper()
+    # Replace hyphens with spaces for compound names
+    given_names = given_names.replace('-', ' ')
+    given_names = re.sub(r'[^A-Za-z\s]', '', given_names).strip().upper()
+    # Clean up multiple spaces
+    given_names = re.sub(r' +', ' ', given_names)
     # Filter out noise words
     if given_names:
         parts = given_names.split()
@@ -1375,11 +1383,18 @@ def process_passport_image(image_bytes: bytes, rotation_angle: float = 0) -> Lis
         logger.info(f"    Confidence: {r.confidence}")
         logger.info(f"    Low confidence fields: {r.low_confidence_fields}")
 
+    # Helper to clean name - replace hyphens with spaces
+    def clean_name_output(name: str) -> str:
+        if not name:
+            return ""
+        # Replace hyphens with spaces and clean up multiple spaces
+        return re.sub(r' +', ' ', name.replace('-', ' ')).strip()
+
     return [
         {
-            "first_name": r.first_name,
-            "middle_name": r.middle_name,
-            "last_name": r.last_name,
+            "first_name": clean_name_output(r.first_name),
+            "middle_name": clean_name_output(r.middle_name),
+            "last_name": clean_name_output(r.last_name),
             "gender": r.gender,
             "date_of_birth": r.date_of_birth,
             "nationality": r.nationality,
