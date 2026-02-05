@@ -120,6 +120,8 @@ function DataTable({ passports, setPassports, onBack }) {
     { key: 'date_of_birth', label: 'DOB', width: 'w-24' },
     { key: 'nationality', label: 'Nat.', width: 'w-14' },
     { key: 'passport_number', label: 'Passport No.', width: 'w-28' },
+    { key: 'checkout_date', label: 'Checkout Date', width: 'w-28' },
+    { key: 'phone_number', label: 'Phone Number', width: 'w-28' },
   ];
 
   const handleCellChange = (index, field, value) => {
@@ -149,6 +151,8 @@ function DataTable({ passports, setPassports, onBack }) {
       date_of_birth: '',
       nationality: '',
       passport_number: '',
+      checkout_date: '',
+      phone_number: '',
       thumbnail: '',
       full_image: '',
       confidence: 0,
@@ -184,6 +188,8 @@ function DataTable({ passports, setPassports, onBack }) {
       first_name: (p.first_name || '').toUpperCase(),
       middle_name: (p.middle_name || '').toUpperCase(),
       last_name: (p.last_name || '').toUpperCase(),
+      checkout_date: p.checkout_date || '',
+      phone_number: p.phone_number || '',
     }));
 
     setExporting(true);

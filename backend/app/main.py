@@ -57,6 +57,8 @@ class PassportData(BaseModel):
     date_of_birth: str = ""
     nationality: str = ""
     passport_number: str = ""
+    checkout_date: str = ""  # Check-out date from UI
+    phone_number: str = ""  # Phone number from UI
     thumbnail: str = ""  # Base64 encoded thumbnail
     full_image: str = ""  # Base64 encoded full/preview image
     confidence: float = 0.0  # OCR confidence score
@@ -246,7 +248,7 @@ async def export_to_excel(
         bottom=Side(style='thin')
     )
 
-    # Thai immigration template headers
+    # Thai immigration template headers (exact format)
     headers = [
         "ชื่อ\nFirst Name *",
         "ชื่อกลาง\nMiddle Name",
@@ -286,8 +288,8 @@ async def export_to_excel(
             passport.passport_number,
             passport.nationality,
             passport.date_of_birth,
-            "",  # Check-out Date - leave empty
-            ""   # Phone No. - leave empty
+            passport.checkout_date,  # Check-out Date from UI input
+            passport.phone_number    # Phone No. from UI input
         ]
         for col, value in enumerate(data, 1):
             cell = ws.cell(row=row, column=col, value=value)

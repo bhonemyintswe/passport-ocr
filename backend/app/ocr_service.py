@@ -336,16 +336,16 @@ def parse_mrz_names(names_section: str) -> Tuple[str, str, str, List[str]]:
         logger.warning("No parts found after splitting")
         return "", "", "", ["first_name", "last_name"]
 
-    # First part is last name - single < becomes hyphen
+    # First part is last name - single < becomes space
     last_name_raw = parts[0]
-    # Replace single < with hyphen (for compound names like ROTARI<DOANI -> ROTARI-DOANI)
-    last_name = last_name_raw.replace('<', '-').strip().upper()
-    # Clean up multiple hyphens
-    last_name = re.sub(r'-+', '-', last_name).strip('-')
+    # Replace single < with space (for compound names like ROTARI<DOANI -> ROTARI DOANI)
+    last_name = last_name_raw.replace('<', ' ').strip().upper()
+    # Clean up multiple spaces
+    last_name = re.sub(r' +', ' ', last_name).strip()
     logger.info(f"Last name: raw='{last_name_raw}' -> cleaned='{last_name}'")
 
     # Validate last name doesn't look like garbage
-    if len(last_name) < 2 or not re.match(r'^[A-Z\-]+$', last_name):
+    if len(last_name) < 2 or not re.match(r'^[A-Z\s]+$', last_name):
         logger.warning(f"Last name '{last_name}' looks invalid")
         low_confidence.append("last_name")
 
@@ -392,7 +392,9 @@ def clean_name(name: str) -> str:
     if not name:
         return ""
 
-    # Remove non-letter characters
+    # Replace hyphens with spaces
+    name = name.replace('-', ' ')
+    # Remove non-letter characters (except spaces)
     name = re.sub(r'[^A-Za-z\s]', '', name)
     # Remove repeated characters
     name = re.sub(r'(.)\1{3,}', '', name)
@@ -1107,8 +1109,8 @@ def is_valid_name(name: str) -> bool:
             return False
 
     # Check for reasonable name patterns
-    # Valid names should be mostly alphabetic
-    alpha_count = sum(1 for c in name if c.isalpha())
+    # Valid names should be mostly alphabetic (spaces allowed for compound names)
+    alpha_count = sum(1 for c in name if c.isalpha() or c == ' ')
     if alpha_count < len(name) * 0.8:
         logger.info(f"Name '{name}' flagged as garbage (low alpha ratio)")
         return False
