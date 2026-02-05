@@ -340,6 +340,9 @@ def parse_mrz_names(names_section: str) -> Tuple[str, str, str, List[str]]:
     last_name_raw = parts[0]
     # Replace single < with space (for compound names like ROTARI<DOANI -> ROTARI DOANI)
     last_name = last_name_raw.replace('<', ' ').strip().upper()
+    # Also replace any hyphen-like characters with spaces
+    for h in ['-', '–', '—', '−', '‐', '‑', '­']:
+        last_name = last_name.replace(h, ' ')
     # Clean up multiple spaces
     last_name = re.sub(r' +', ' ', last_name).strip()
     logger.info(f"Last name: raw='{last_name_raw}' -> cleaned='{last_name}'")
@@ -364,16 +367,28 @@ def parse_mrz_names(names_section: str) -> Tuple[str, str, str, List[str]]:
 
         if given_names:
             first_name = given_names[0].upper()
+            # Replace any hyphen-like characters with spaces
+            for h in ['-', '–', '—', '−', '‐', '‑', '­']:
+                first_name = first_name.replace(h, ' ')
+            first_name = re.sub(r' +', ' ', first_name).strip()
             logger.info(f"First name: '{first_name}'")
 
-            # Validate first name
-            if len(first_name) < 2 or not re.match(r'^[A-Z]+$', first_name):
+            # Validate first name (allow spaces for compound names)
+            if len(first_name) < 2 or not re.match(r'^[A-Z\s]+$', first_name):
                 logger.warning(f"First name '{first_name}' looks invalid")
                 low_confidence.append("first_name")
 
             if len(given_names) > 1:
-                # Filter middle names - must be valid
-                middle_parts = [n.upper() for n in given_names[1:] if n and re.match(r'^[A-Z]+$', n)]
+                # Filter middle names - must be valid, replace hyphens with spaces
+                middle_parts = []
+                for n in given_names[1:]:
+                    if n:
+                        mn = n.upper()
+                        for h in ['-', '–', '—', '−', '‐', '‑', '­']:
+                            mn = mn.replace(h, ' ')
+                        mn = re.sub(r' +', ' ', mn).strip()
+                        if re.match(r'^[A-Z\s]+$', mn):
+                            middle_parts.append(mn)
                 middle_name = " ".join(middle_parts)
                 logger.info(f"Middle name(s): {given_names[1:]} -> '{middle_name}'")
         else:
@@ -392,8 +407,10 @@ def clean_name(name: str) -> str:
     if not name:
         return ""
 
-    # Replace hyphens with spaces
-    name = name.replace('-', ' ')
+    # Replace all hyphen-like characters with spaces
+    hyphen_chars = ['-', '–', '—', '−', '‐', '‑', '­']
+    for h in hyphen_chars:
+        name = name.replace(h, ' ')
     # Remove non-letter characters (except spaces)
     name = re.sub(r'[^A-Za-z\s]', '', name)
     # Remove repeated characters
@@ -704,8 +721,9 @@ def extract_fields_from_text(text: str) -> Optional[PassportData]:
     last_name = find_value_after_label(surname_patterns, lines)
     # Clean: remove any label text and non-alpha characters
     last_name = re.sub(r'(?:SURNAME|FAMILY\s*NAME|NOM|NUMELE|/.*)', '', last_name, flags=re.IGNORECASE).strip()
-    # Replace hyphens with spaces for compound names
-    last_name = last_name.replace('-', ' ')
+    # Replace all hyphen-like characters with spaces for compound names
+    for h in ['-', '–', '—', '−', '‐', '‑', '­']:
+        last_name = last_name.replace(h, ' ')
     last_name = re.sub(r'[^A-Za-z\s]', '', last_name).strip().upper()
     # Clean up multiple spaces
     last_name = re.sub(r' +', ' ', last_name)
@@ -786,8 +804,9 @@ def extract_fields_from_text(text: str) -> Optional[PassportData]:
             break
 
     given_names = re.sub(r'(?:GIVEN\s*NAME|FIRST\s*NAME|FORENAME|PRENUMELE|PR[EÉ]NOM|/.*)', '', given_names, flags=re.IGNORECASE).strip()
-    # Replace hyphens with spaces for compound names
-    given_names = given_names.replace('-', ' ')
+    # Replace all hyphen-like characters with spaces for compound names
+    for h in ['-', '–', '—', '−', '‐', '‑', '­']:
+        given_names = given_names.replace(h, ' ')
     given_names = re.sub(r'[^A-Za-z\s]', '', given_names).strip().upper()
     # Clean up multiple spaces
     given_names = re.sub(r' +', ' ', given_names)
@@ -1014,6 +1033,21 @@ def extract_fields_from_text(text: str) -> Optional[PassportData]:
         'UKRAINIAN': 'UKR', 'UKRAINE': 'UKR',
         'RUSSIAN': 'RUS', 'RUSSIA': 'RUS',
         'MOLDOVAN': 'MDA', 'MOLDOVA': 'MDA',
+        # Southeast Asian countries
+        'MYANMAR': 'MMR', 'BURMESE': 'MMR', 'BURMA': 'MMR',
+        'THAI': 'THA', 'THAILAND': 'THA',
+        'VIETNAMESE': 'VNM', 'VIETNAM': 'VNM', 'VIET NAM': 'VNM',
+        'MALAYSIAN': 'MYS', 'MALAYSIA': 'MYS',
+        'SINGAPOREAN': 'SGP', 'SINGAPORE': 'SGP',
+        'INDONESIAN': 'IDN', 'INDONESIA': 'IDN',
+        'FILIPINO': 'PHL', 'PHILIPPINES': 'PHL', 'PHILIPPINE': 'PHL',
+        'CAMBODIAN': 'KHM', 'CAMBODIA': 'KHM',
+        'LAOTIAN': 'LAO', 'LAOS': 'LAO',
+        # Other common countries
+        'CHINESE': 'CHN', 'CHINA': 'CHN',
+        'JAPANESE': 'JPN', 'JAPAN': 'JPN',
+        'KOREAN': 'KOR', 'KOREA': 'KOR', 'SOUTH KOREA': 'KOR',
+        'INDIAN': 'IND', 'INDIA': 'IND',
     }
 
     # Look for nationality label and value
@@ -1039,8 +1073,8 @@ def extract_fields_from_text(text: str) -> Optional[PassportData]:
 
     # Look for 3-letter country code
     if not nationality:
-        # Common 3-letter codes
-        code_match = re.search(r'\b(HUN|ISR|USA|GBR|DEU|FRA|ITA|ESP|CAN|AUS|ROU|POL|UKR|RUS|MDA)\b', text_upper)
+        # Common 3-letter codes (including Southeast Asian countries)
+        code_match = re.search(r'\b(HUN|ISR|USA|GBR|DEU|FRA|ITA|ESP|CAN|AUS|ROU|POL|UKR|RUS|MDA|MMR|THA|VNM|MYS|SGP|IDN|PHL|KHM|LAO|CHN|JPN|KOR|IND)\b', text_upper)
         if code_match:
             nationality = code_match.group(1)
             logger.info(f"Found nationality code: '{nationality}'")
@@ -1383,12 +1417,17 @@ def process_passport_image(image_bytes: bytes, rotation_angle: float = 0) -> Lis
         logger.info(f"    Confidence: {r.confidence}")
         logger.info(f"    Low confidence fields: {r.low_confidence_fields}")
 
-    # Helper to clean name - replace hyphens with spaces
+    # Helper to clean name - replace ALL hyphen-like characters with spaces
     def clean_name_output(name: str) -> str:
         if not name:
             return ""
-        # Replace hyphens with spaces and clean up multiple spaces
-        return re.sub(r' +', ' ', name.replace('-', ' ')).strip()
+        # Replace all hyphen-like Unicode characters with spaces
+        # Includes: hyphen-minus, en-dash, em-dash, minus sign, hyphen, non-breaking hyphen
+        hyphen_chars = ['-', '–', '—', '−', '‐', '‑', '­']
+        for h in hyphen_chars:
+            name = name.replace(h, ' ')
+        # Clean up multiple spaces
+        return re.sub(r' +', ' ', name).strip()
 
     return [
         {
