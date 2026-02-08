@@ -1212,10 +1212,14 @@ def is_valid_nationality(nat: str) -> bool:
 def calculate_field_confidence(field_name: str, mrz_val: str, text_val: str, merged_val: str) -> float:
     """
     Score a single field 0.0-1.0 based on source and validation.
-    - MRZ source + valid = 0.85
-    - Text source + valid = 0.60
+    Conservative scoring — validation only checks format, not correctness.
+    - MRZ source + valid format = 0.60
+    - Text source + valid format = 0.40
     - Cross-validation bonus (+0.15 if MRZ and text agree)
+    - MRZ invalid format = 0.25
+    - Text invalid format = 0.15
     - Empty = 0.0
+    Max possible per field = 0.75 (MRZ valid + cross-validated)
     """
     if not merged_val:
         return 0.0
@@ -1238,26 +1242,23 @@ def calculate_field_confidence(field_name: str, mrz_val: str, text_val: str, mer
 
     score = 0.0
 
-    # Base score from source
+    # Base score from source — conservative, format validation != correctness
     mrz_valid = field_is_valid(mrz_val)
     text_valid = field_is_valid(text_val)
 
     if mrz_val and merged_val == mrz_val:
-        # Merged value came from MRZ
-        score = 0.85 if mrz_valid else 0.45
+        score = 0.60 if mrz_valid else 0.25
     elif text_val and merged_val == text_val:
-        # Merged value came from text
-        score = 0.60 if text_valid else 0.30
+        score = 0.40 if text_valid else 0.15
     else:
-        # Fallback
-        score = 0.40
+        score = 0.20
 
-    # Cross-validation bonus: both sources agree
+    # Cross-validation bonus: both sources independently agree
     if mrz_val and text_val:
         mrz_norm = mrz_val.upper().strip()
         text_norm = text_val.upper().strip()
         if mrz_norm == text_norm:
-            score = min(1.0, score + 0.15)
+            score = min(0.75, score + 0.15)
 
     return round(score, 2)
 
@@ -1280,12 +1281,12 @@ def score_passport_confidence(merged: PassportData, mrz_data: Optional[PassportD
     for field, score in field_scores.items():
         logger.info(f"  {field}: {score}")
 
-    # Overall confidence = average of non-zero field scores
-    non_zero = [s for s in field_scores.values() if s > 0]
-    overall = round(sum(non_zero) / len(non_zero), 2) if non_zero else 0.0
+    # Overall confidence = average of ALL 6 key fields (including 0.0 for empty)
+    all_scores = list(field_scores.values())
+    overall = round(sum(all_scores) / len(all_scores), 2) if all_scores else 0.0
 
-    # Low confidence fields = those scoring < 0.6
-    low_conf = [f for f, s in field_scores.items() if s < 0.6]
+    # Low confidence fields = those scoring < 0.5
+    low_conf = [f for f, s in field_scores.items() if s < 0.5]
 
     merged.confidence = overall
     merged.low_confidence_fields = low_conf
