@@ -1186,11 +1186,123 @@ def is_valid_passport_number(pn: str) -> bool:
     return True
 
 
+def is_valid_date(date_str: str) -> bool:
+    """Check if a date string looks valid (DD/MM/YYYY format)."""
+    if not date_str:
+        return False
+    match = re.match(r'^(\d{2})/(\d{2})/(\d{4})$', date_str)
+    if not match:
+        return False
+    dd, mm, yyyy = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    return 1 <= dd <= 31 and 1 <= mm <= 12 and 1900 <= yyyy <= 2030
+
+
+def is_valid_gender(gender: str) -> bool:
+    """Check if gender value is valid."""
+    return gender in ('M', 'F')
+
+
+def is_valid_nationality(nat: str) -> bool:
+    """Check if nationality is a valid 3-letter country code."""
+    if not nat or len(nat) != 3:
+        return False
+    return bool(re.match(r'^[A-Z]{3}$', nat))
+
+
+def calculate_field_confidence(field_name: str, mrz_val: str, text_val: str, merged_val: str) -> float:
+    """
+    Score a single field 0.0-1.0 based on source and validation.
+    - MRZ source + valid = 0.85
+    - Text source + valid = 0.60
+    - Cross-validation bonus (+0.15 if MRZ and text agree)
+    - Empty = 0.0
+    """
+    if not merged_val:
+        return 0.0
+
+    # Determine validation based on field type
+    def field_is_valid(val: str) -> bool:
+        if not val:
+            return False
+        if field_name in ('first_name', 'middle_name', 'last_name'):
+            return is_valid_name(val)
+        elif field_name == 'passport_number':
+            return is_valid_passport_number(val)
+        elif field_name == 'date_of_birth':
+            return is_valid_date(val)
+        elif field_name == 'gender':
+            return is_valid_gender(val)
+        elif field_name == 'nationality':
+            return is_valid_nationality(val)
+        return bool(val)
+
+    score = 0.0
+
+    # Base score from source
+    mrz_valid = field_is_valid(mrz_val)
+    text_valid = field_is_valid(text_val)
+
+    if mrz_val and merged_val == mrz_val:
+        # Merged value came from MRZ
+        score = 0.85 if mrz_valid else 0.45
+    elif text_val and merged_val == text_val:
+        # Merged value came from text
+        score = 0.60 if text_valid else 0.30
+    else:
+        # Fallback
+        score = 0.40
+
+    # Cross-validation bonus: both sources agree
+    if mrz_val and text_val:
+        mrz_norm = mrz_val.upper().strip()
+        text_norm = text_val.upper().strip()
+        if mrz_norm == text_norm:
+            score = min(1.0, score + 0.15)
+
+    return round(score, 2)
+
+
+def score_passport_confidence(merged: PassportData, mrz_data: Optional[PassportData], text_data: Optional[PassportData]) -> PassportData:
+    """
+    Score all key fields and compute overall confidence.
+    Updates merged PassportData with accurate confidence and low_confidence_fields.
+    """
+    key_fields = ['first_name', 'last_name', 'passport_number', 'date_of_birth', 'gender', 'nationality']
+
+    field_scores = {}
+    for field in key_fields:
+        merged_val = getattr(merged, field, '')
+        mrz_val = getattr(mrz_data, field, '') if mrz_data else ''
+        text_val = getattr(text_data, field, '') if text_data else ''
+        field_scores[field] = calculate_field_confidence(field, mrz_val, text_val, merged_val)
+
+    logger.info("FIELD CONFIDENCE SCORES:")
+    for field, score in field_scores.items():
+        logger.info(f"  {field}: {score}")
+
+    # Overall confidence = average of non-zero field scores
+    non_zero = [s for s in field_scores.values() if s > 0]
+    overall = round(sum(non_zero) / len(non_zero), 2) if non_zero else 0.0
+
+    # Low confidence fields = those scoring < 0.6
+    low_conf = [f for f, s in field_scores.items() if s < 0.6]
+
+    merged.confidence = overall
+    merged.low_confidence_fields = low_conf
+
+    logger.info(f"  Overall confidence: {overall}")
+    logger.info(f"  Low confidence fields: {low_conf}")
+
+    return merged
+
+
 def merge_passport_data(mrz_data: Optional[PassportData], text_data: Optional[PassportData]) -> Optional[PassportData]:
     """
-    Merge MRZ parsing results with direct text extraction.
-    MRZ data takes ABSOLUTE priority when valid.
-    Text extraction only fills truly empty MRZ fields with valid-looking data.
+    Smart per-field merge of MRZ and text extraction results.
+    - Names: prefer MRZ if valid, but use text if MRZ fails is_valid_name()
+    - Passport number: cross-validate; prefer MRZ if valid, else text
+    - Structured fields (DOB, gender, nationality): MRZ priority (fixed positions), text fills gaps
+    - Confidence scoring delegated to score_passport_confidence()
     """
     if not mrz_data and not text_data:
         return None
@@ -1202,88 +1314,146 @@ def merge_passport_data(mrz_data: Optional[PassportData], text_data: Optional[Pa
         return mrz_data
 
     logger.info("=" * 60)
-    logger.info("MERGING MRZ + TEXT EXTRACTION DATA")
+    logger.info("SMART MERGE: MRZ + TEXT EXTRACTION DATA")
     logger.info("=" * 60)
     logger.info(f"MRZ Data: first='{mrz_data.first_name}', last='{mrz_data.last_name}', pn='{mrz_data.passport_number}'")
     logger.info(f"Text Data: first='{text_data.first_name}', last='{text_data.last_name}', pn='{text_data.passport_number}'")
 
-    # Helper to choose best value: MRZ takes priority if valid
+    # --- Names: use text if MRZ is garbage ---
     def choose_name(mrz_val: str, text_val: str, field_name: str) -> str:
-        # MRZ always wins if it has a value
-        if mrz_val and is_valid_name(mrz_val):
-            logger.info(f"  {field_name}: Using MRZ value '{mrz_val}'")
+        mrz_ok = is_valid_name(mrz_val)
+        text_ok = is_valid_name(text_val)
+
+        if mrz_val and mrz_ok:
+            logger.info(f"  {field_name}: MRZ valid -> '{mrz_val}'")
             return mrz_val
+        elif mrz_val and not mrz_ok and text_val and text_ok:
+            # Key change: text wins when MRZ is garbage
+            logger.info(f"  {field_name}: MRZ garbage '{mrz_val}', using text '{text_val}'")
+            return text_val
         elif mrz_val:
-            # MRZ has value but it looks like garbage - still prefer it over text extraction
-            # because MRZ is more reliable source, text extraction garbage is usually worse
-            logger.info(f"  {field_name}: MRZ value '{mrz_val}' looks suspicious, but still using it")
+            logger.info(f"  {field_name}: MRZ suspect '{mrz_val}', no better text alternative")
             return mrz_val
-        elif text_val and is_valid_name(text_val):
-            logger.info(f"  {field_name}: MRZ empty, using text value '{text_val}'")
+        elif text_val and text_ok:
+            logger.info(f"  {field_name}: MRZ empty, using text '{text_val}'")
             return text_val
         else:
             logger.info(f"  {field_name}: No valid value found")
             return mrz_val or text_val or ""
 
-    def choose_value(mrz_val: str, text_val: str, field_name: str) -> str:
-        # MRZ always wins if it has a value
-        if mrz_val:
-            logger.info(f"  {field_name}: Using MRZ value '{mrz_val}'")
-            return mrz_val
-        elif text_val:
-            logger.info(f"  {field_name}: MRZ empty, using text value '{text_val}'")
-            return text_val
-        else:
-            return ""
-
-    # MRZ passport number validation - should be 7-9 chars, not nationality code
+    # --- Passport number: cross-validate ---
     mrz_pn = mrz_data.passport_number
     text_pn = text_data.passport_number
-
-    # Validate passport numbers
     mrz_pn_valid = is_valid_passport_number(mrz_pn)
     text_pn_valid = is_valid_passport_number(text_pn)
 
     if mrz_pn_valid:
         passport_number = mrz_pn
-        logger.info(f"  passport_number: Using MRZ value '{mrz_pn}'")
+        logger.info(f"  passport_number: MRZ valid -> '{mrz_pn}'")
     elif text_pn_valid:
         passport_number = text_pn
-        logger.info(f"  passport_number: MRZ invalid, using text value '{text_pn}'")
+        logger.info(f"  passport_number: MRZ invalid, text valid -> '{text_pn}'")
     else:
         passport_number = mrz_pn or text_pn
-        logger.info(f"  passport_number: No valid passport number found, using '{passport_number}'")
+        logger.info(f"  passport_number: Neither valid, using '{passport_number}'")
+
+    # --- Structured fields: MRZ priority, text fills gaps ---
+    def choose_structured(mrz_val: str, text_val: str, field_name: str, validator) -> str:
+        if mrz_val and validator(mrz_val):
+            logger.info(f"  {field_name}: MRZ valid -> '{mrz_val}'")
+            return mrz_val
+        elif mrz_val and not validator(mrz_val) and text_val and validator(text_val):
+            logger.info(f"  {field_name}: MRZ invalid, text valid -> '{text_val}'")
+            return text_val
+        elif mrz_val:
+            logger.info(f"  {field_name}: MRZ value '{mrz_val}' (unvalidated)")
+            return mrz_val
+        elif text_val:
+            logger.info(f"  {field_name}: MRZ empty, using text '{text_val}'")
+            return text_val
+        else:
+            return ""
 
     merged = PassportData(
         first_name=choose_name(mrz_data.first_name, text_data.first_name, "first_name"),
         middle_name=choose_name(mrz_data.middle_name, text_data.middle_name, "middle_name"),
         last_name=choose_name(mrz_data.last_name, text_data.last_name, "last_name"),
-        gender=choose_value(mrz_data.gender, text_data.gender, "gender"),
-        date_of_birth=choose_value(mrz_data.date_of_birth, text_data.date_of_birth, "date_of_birth"),
-        nationality=choose_value(mrz_data.nationality, text_data.nationality, "nationality"),
+        gender=choose_structured(mrz_data.gender, text_data.gender, "gender", is_valid_gender),
+        date_of_birth=choose_structured(mrz_data.date_of_birth, text_data.date_of_birth, "date_of_birth", is_valid_date),
+        nationality=choose_structured(mrz_data.nationality, text_data.nationality, "nationality", is_valid_nationality),
         passport_number=passport_number,
-        confidence=max(mrz_data.confidence, text_data.confidence),
-        low_confidence_fields=[]
     )
 
-    # Recalculate low confidence fields
-    if not merged.first_name:
-        merged.low_confidence_fields.append("first_name")
-    if not merged.last_name:
-        merged.low_confidence_fields.append("last_name")
-    if not merged.passport_number:
-        merged.low_confidence_fields.append("passport_number")
-    if not merged.date_of_birth:
-        merged.low_confidence_fields.append("date_of_birth")
-    if not merged.gender:
-        merged.low_confidence_fields.append("gender")
-    if not merged.nationality:
-        merged.low_confidence_fields.append("nationality")
+    # Delegate confidence scoring
+    merged = score_passport_confidence(merged, mrz_data, text_data)
 
     logger.info(f"MERGED RESULT: {merged.first_name} {merged.last_name} - {merged.passport_number}")
     logger.info("=" * 60)
 
     return merged
+
+
+def preprocess_image(image: np.ndarray) -> np.ndarray:
+    """
+    Preprocess passport image for better OCR accuracy.
+    Steps: upscale, CLAHE contrast, sharpen, deskew, light denoise.
+    """
+    logger.info("PREPROCESSING IMAGE...")
+    h, w = image.shape[:2]
+
+    # 1. Upscale if longest side < 1500px
+    longest = max(h, w)
+    if longest < 1500:
+        scale = 1500.0 / longest
+        new_w, new_h = int(w * scale), int(h * scale)
+        image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+        logger.info(f"  Upscaled {w}x{h} -> {new_w}x{new_h}")
+
+    # 2. CLAHE contrast enhancement on L channel of LAB color space
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    l_channel = clahe.apply(l_channel)
+    lab = cv2.merge([l_channel, a_channel, b_channel])
+    image = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+    logger.info("  Applied CLAHE contrast enhancement")
+
+    # 3. Sharpen via unsharp mask (weight 1.5 original, 0.5 blurred)
+    blurred = cv2.GaussianBlur(image, (0, 0), 3)
+    image = cv2.addWeighted(image, 1.5, blurred, -0.5, 0)
+    logger.info("  Applied unsharp mask sharpening")
+
+    # 4. Deskew — detect skew angle via minAreaRect on thresholded text contours
+    try:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+        coords = np.column_stack(np.where(thresh > 0))
+        if len(coords) > 100:
+            angle = cv2.minAreaRect(coords)[-1]
+            # minAreaRect returns angles in [-90, 0); normalize
+            if angle < -45:
+                angle = 90 + angle
+            if 0.5 < abs(angle) < 15:
+                (h2, w2) = image.shape[:2]
+                center = (w2 // 2, h2 // 2)
+                M = cv2.getRotationMatrix2D(center, angle, 1.0)
+                image = cv2.warpAffine(image, M, (w2, h2),
+                                       flags=cv2.INTER_CUBIC,
+                                       borderMode=cv2.BORDER_REPLICATE)
+                logger.info(f"  Deskewed by {angle:.2f} degrees")
+            else:
+                logger.info(f"  Skew angle {angle:.2f} outside correction range, skipping deskew")
+        else:
+            logger.info("  Not enough text contours for deskew detection")
+    except Exception as e:
+        logger.warning(f"  Deskew failed: {e}")
+
+    # 5. Light denoise
+    image = cv2.fastNlMeansDenoisingColored(image, None, h=6, hForColorComponents=6, templateWindowSize=7, searchWindowSize=21)
+    logger.info("  Applied light denoise")
+
+    logger.info("  Preprocessing complete")
+    return image
 
 
 def rotate_image_arbitrary(image: np.ndarray, angle: float) -> np.ndarray:
@@ -1309,6 +1479,23 @@ def rotate_image_arbitrary(image: np.ndarray, angle: float) -> np.ndarray:
                               borderValue=(255, 255, 255))
 
     return rotated
+
+
+def has_mrz_in_text(text: str) -> bool:
+    """Quick check if OCR text contains MRZ-like lines (P< start or Line 2 pattern)."""
+    if not text:
+        return False
+    for line in text.split('\n'):
+        cleaned = re.sub(r'[^A-Z0-9<]', '', line.upper())
+        if len(cleaned) < 20:
+            continue
+        # Check for Line 1 pattern
+        if cleaned.startswith('P<') and '<<' in cleaned:
+            return True
+        # Check for Line 2 pattern
+        if re.match(r'^[A-Z0-9<]{9}[0-9<][A-Z]{3}[0-9]{6}', cleaned):
+            return True
+    return False
 
 
 def process_passport_image(image_bytes: bytes, rotation_angle: float = 0) -> List[dict]:
@@ -1338,27 +1525,52 @@ def process_passport_image(image_bytes: bytes, rotation_angle: float = 0) -> Lis
     if rotation_angle != 0:
         logger.info(f"Applying rotation: {rotation_angle} degrees")
         image = rotate_image_arbitrary(image, rotation_angle)
-        # Re-encode for API
-        _, buffer = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 95])
-        image_bytes = buffer.tobytes()
+
+    # Preprocess image for better OCR accuracy
+    image = preprocess_image(image)
+
+    # Re-encode preprocessed image to JPEG 95%
+    _, buffer = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    image_bytes = buffer.tobytes()
 
     # Convert to base64 for Google Vision API
     image_base64 = base64.b64encode(image_bytes).decode('utf-8')
 
-    # Call Google Cloud Vision API
-    logger.info("Calling Google Cloud Vision API...")
+    # === AUTO-ORIENTATION DETECTION ===
+    # Send image at current orientation, check for MRZ
+    # If no MRZ found, try 180° rotation (max 2 API calls)
+    logger.info("Calling Google Cloud Vision API (orientation 0°)...")
     vision_response = call_google_vision_api(image_base64)
 
     if not vision_response:
         logger.error("No response from Google Vision API")
         return []
 
-    # Extract text from response
     full_text = extract_text_from_vision_response(vision_response)
 
     if not full_text:
         logger.error("No text extracted from image")
         return []
+
+    # Check if MRZ was found at current orientation
+    if not has_mrz_in_text(full_text):
+        logger.info("No MRZ detected at 0° — trying 180° rotation...")
+        # Rotate image 180°
+        image_180 = cv2.rotate(image, cv2.ROTATE_180)
+        _, buffer_180 = cv2.imencode('.jpg', image_180, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        image_base64_180 = base64.b64encode(buffer_180.tobytes()).decode('utf-8')
+
+        vision_response_180 = call_google_vision_api(image_base64_180)
+        if vision_response_180:
+            full_text_180 = extract_text_from_vision_response(vision_response_180)
+            if full_text_180 and has_mrz_in_text(full_text_180):
+                logger.info("MRZ found at 180° — using rotated image")
+                full_text = full_text_180
+                image = image_180
+            else:
+                logger.info("No MRZ at 180° either — keeping original orientation for Tier 2")
+    else:
+        logger.info("MRZ detected at 0° — orientation OK")
 
     results = []
 
