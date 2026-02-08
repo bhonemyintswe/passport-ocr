@@ -1132,15 +1132,46 @@ def extract_fields_from_text(text: str) -> Optional[PassportData]:
     return None
 
 
+def fix_mrz_name_ocr(name: str) -> str:
+    """
+    Fix common OCR digit→letter substitutions in MRZ name fields.
+    MRZ names never contain digits, so any digit is an OCR misread.
+    Examples: 0→O, 1→I, 5→S, 8→B, 6→G, 2→Z, 4→A
+    """
+    if not name:
+        return name
+
+    # Common digit-to-letter OCR substitutions in passport MRZ
+    ocr_fixes = {
+        '0': 'O',
+        '1': 'I',
+        '2': 'Z',
+        '4': 'A',
+        '5': 'S',
+        '6': 'G',
+        '8': 'B',
+    }
+
+    fixed = name
+    for digit, letter in ocr_fixes.items():
+        fixed = fixed.replace(digit, letter)
+
+    if fixed != name:
+        logger.info(f"  MRZ OCR fix: '{name}' -> '{fixed}'")
+
+    return fixed
+
+
 def is_valid_name(name: str) -> bool:
     """Check if a name looks valid (not garbage OCR)."""
     if not name or len(name) < 2:
         return False
 
-    # Garbage patterns that indicate OCR errors
+    # Garbage patterns that indicate OCR errors or watermark text
     garbage_indicators = [
         r'OFISRA', r'FISRA', r'ISRAEL', r'STATE', r'PASAPORT', r'PASSPORT',
         r'SPRIN', r'SUMA', r'MAON', r'ROMANA', r'DOCUMENT', r'REPUBLIC',
+        r'^FISF$', r'^FIS[A-Z]$',  # Mangled "OF ISR..." watermark fragments
         r'^\d', r'\d$',  # Starts or ends with digit
     ]
 
@@ -1320,27 +1351,31 @@ def merge_passport_data(mrz_data: Optional[PassportData], text_data: Optional[Pa
     logger.info(f"MRZ Data: first='{mrz_data.first_name}', last='{mrz_data.last_name}', pn='{mrz_data.passport_number}'")
     logger.info(f"Text Data: first='{text_data.first_name}', last='{text_data.last_name}', pn='{text_data.passport_number}'")
 
-    # --- Names: use text if MRZ is garbage ---
+    # --- Names: fix MRZ OCR errors first, then validate ---
     def choose_name(mrz_val: str, text_val: str, field_name: str) -> str:
-        mrz_ok = is_valid_name(mrz_val)
+        # Step 1: Fix common digit→letter OCR errors in MRZ names
+        mrz_fixed = fix_mrz_name_ocr(mrz_val) if mrz_val else mrz_val
+
+        mrz_ok = is_valid_name(mrz_fixed)
         text_ok = is_valid_name(text_val)
 
-        if mrz_val and mrz_ok:
-            logger.info(f"  {field_name}: MRZ valid -> '{mrz_val}'")
-            return mrz_val
-        elif mrz_val and not mrz_ok and text_val and text_ok:
-            # Key change: text wins when MRZ is garbage
-            logger.info(f"  {field_name}: MRZ garbage '{mrz_val}', using text '{text_val}'")
+        if mrz_fixed and mrz_ok:
+            logger.info(f"  {field_name}: MRZ valid -> '{mrz_fixed}'")
+            return mrz_fixed
+        elif mrz_fixed and not mrz_ok and text_val and text_ok:
+            # Text wins only when MRZ is still garbage after OCR fix
+            logger.info(f"  {field_name}: MRZ garbage '{mrz_fixed}', using text '{text_val}'")
             return text_val
-        elif mrz_val:
-            logger.info(f"  {field_name}: MRZ suspect '{mrz_val}', no better text alternative")
-            return mrz_val
+        elif mrz_fixed:
+            # Both fail or text is worse — use MRZ (OCR-corrected) anyway
+            logger.info(f"  {field_name}: MRZ suspect '{mrz_fixed}', no better text alternative")
+            return mrz_fixed
         elif text_val and text_ok:
             logger.info(f"  {field_name}: MRZ empty, using text '{text_val}'")
             return text_val
         else:
             logger.info(f"  {field_name}: No valid value found")
-            return mrz_val or text_val or ""
+            return mrz_fixed or text_val or ""
 
     # --- Passport number: cross-validate ---
     mrz_pn = mrz_data.passport_number
