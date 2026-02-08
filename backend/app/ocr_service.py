@@ -1394,50 +1394,118 @@ def merge_passport_data(mrz_data: Optional[PassportData], text_data: Optional[Pa
     return merged
 
 
-def preprocess_image(image: np.ndarray) -> np.ndarray:
-    """
-    Gentle image preprocessing for better OCR accuracy.
-    Only upscale small images and apply mild contrast enhancement.
-    Google Vision handles skew/noise well on its own — don't over-process.
-    """
-    logger.info("PREPROCESSING IMAGE...")
+def upscale_image(image: np.ndarray, min_side: int = 2000) -> np.ndarray:
+    """Upscale image so longest side is at least min_side pixels."""
     h, w = image.shape[:2]
-    logger.info(f"  Original size: {w}x{h}")
-
-    # 1. Upscale if longest side < 1500px — small images hurt OCR badly
     longest = max(h, w)
-    if longest < 1500:
-        scale = 1500.0 / longest
+    if longest < min_side:
+        scale = min_side / longest
         new_w, new_h = int(w * scale), int(h * scale)
         image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
         logger.info(f"  Upscaled {w}x{h} -> {new_w}x{new_h}")
+    return image
 
-    # 2. Gentle CLAHE contrast on L channel — helps with dark/washed-out passports
+
+def preprocess_enhanced(image: np.ndarray) -> np.ndarray:
+    """
+    Enhanced preprocessing: upscale + white balance + CLAHE + mild sharpen.
+    Good for most passport images — improves contrast without destroying text.
+    """
+    logger.info("  [Enhanced] Starting...")
+    image = upscale_image(image, 2000)
+
+    # Auto white balance (gray world assumption) — fixes color cast from scanners
+    try:
+        img_float = image.astype(np.float32)
+        avg_b, avg_g, avg_r = cv2.mean(image)[:3]
+        avg_all = (avg_b + avg_g + avg_r) / 3.0
+        img_float[:, :, 0] *= avg_all / max(avg_b, 1)
+        img_float[:, :, 1] *= avg_all / max(avg_g, 1)
+        img_float[:, :, 2] *= avg_all / max(avg_r, 1)
+        image = np.clip(img_float, 0, 255).astype(np.uint8)
+        logger.info("  [Enhanced] Applied white balance")
+    except Exception as e:
+        logger.warning(f"  [Enhanced] White balance failed (non-fatal): {e}")
+
+    # CLAHE on L channel
     try:
         lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
         l_channel, a_channel, b_channel = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         l_channel = clahe.apply(l_channel)
         lab = cv2.merge([l_channel, a_channel, b_channel])
         image = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-        logger.info("  Applied gentle CLAHE contrast")
+        logger.info("  [Enhanced] Applied CLAHE contrast")
     except Exception as e:
-        logger.warning(f"  CLAHE failed (non-fatal): {e}")
+        logger.warning(f"  [Enhanced] CLAHE failed (non-fatal): {e}")
 
-    # 3. Very mild sharpen — only slight boost, avoids creating artifacts
+    # Mild unsharp mask
     try:
         blurred = cv2.GaussianBlur(image, (0, 0), 2)
         image = cv2.addWeighted(image, 1.3, blurred, -0.3, 0)
-        logger.info("  Applied mild sharpening")
+        logger.info("  [Enhanced] Applied mild sharpening")
     except Exception as e:
-        logger.warning(f"  Sharpening failed (non-fatal): {e}")
+        logger.warning(f"  [Enhanced] Sharpening failed (non-fatal): {e}")
 
-    # NOTE: No deskew — Google Vision handles skew well; deskew via minAreaRect
-    # often misdetects and rotates the image wildly, destroying OCR.
-    # NOTE: No denoise — fastNlMeans is slow and can smear fine MRZ text.
-
-    logger.info("  Preprocessing complete")
     return image
+
+
+def preprocess_high_contrast(image: np.ndarray) -> np.ndarray:
+    """
+    High-contrast preprocessing for dark, washed-out, or low-quality passport images.
+    Stronger CLAHE + brightness normalization + sharper unsharp mask.
+    """
+    logger.info("  [HighContrast] Starting...")
+    image = upscale_image(image, 2000)
+
+    # Brightness/contrast auto-normalization via histogram stretching
+    try:
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        l_channel, a_channel, b_channel = cv2.split(lab)
+
+        # Stretch L channel to full 0-255 range
+        l_min, l_max = np.percentile(l_channel, [2, 98])
+        if l_max > l_min:
+            l_channel = np.clip((l_channel.astype(np.float32) - l_min) * 255.0 / (l_max - l_min), 0, 255).astype(np.uint8)
+            logger.info(f"  [HighContrast] Stretched brightness range {l_min:.0f}-{l_max:.0f} -> 0-255")
+
+        # Stronger CLAHE
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        l_channel = clahe.apply(l_channel)
+
+        lab = cv2.merge([l_channel, a_channel, b_channel])
+        image = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        logger.info("  [HighContrast] Applied strong CLAHE")
+    except Exception as e:
+        logger.warning(f"  [HighContrast] Contrast enhancement failed (non-fatal): {e}")
+
+    # Sharper unsharp mask
+    try:
+        blurred = cv2.GaussianBlur(image, (0, 0), 3)
+        image = cv2.addWeighted(image, 1.5, blurred, -0.5, 0)
+        logger.info("  [HighContrast] Applied strong sharpening")
+    except Exception as e:
+        logger.warning(f"  [HighContrast] Sharpening failed (non-fatal): {e}")
+
+    return image
+
+
+def encode_image_base64(image: np.ndarray) -> str:
+    """Encode an OpenCV image to JPEG base64 string."""
+    _, buffer = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    return base64.b64encode(buffer.tobytes()).decode('utf-8')
+
+
+def try_vision_api(image: np.ndarray, label: str) -> str:
+    """Send image to Google Vision API and return extracted text."""
+    image_base64 = encode_image_base64(image)
+    logger.info(f"Calling Google Vision API ({label})...")
+    response = call_google_vision_api(image_base64)
+    if response:
+        text = extract_text_from_vision_response(response)
+        logger.info(f"  {label}: got {len(text)} chars, MRZ={'YES' if has_mrz_in_text(text) else 'NO'}")
+        return text
+    return ""
 
 
 def rotate_image_arbitrary(image: np.ndarray, angle: float) -> np.ndarray:
@@ -1505,66 +1573,78 @@ def process_passport_image(image_bytes: bytes, rotation_angle: float = 0) -> Lis
 
     logger.info(f"Image size: {image.shape}")
 
-    # Keep a copy of the original image for fallback
-    original_image = image.copy()
-
     # Apply manual rotation if specified
     if rotation_angle != 0:
         logger.info(f"Applying rotation: {rotation_angle} degrees")
         image = rotate_image_arbitrary(image, rotation_angle)
-        original_image = image.copy()
 
-    # Preprocess image for better OCR accuracy
-    preprocessed = preprocess_image(image)
+    # === MULTI-ATTEMPT OCR STRATEGY ===
+    # Try multiple preprocessing variants, pick the best result.
+    # Priority: MRZ found > more text extracted > any text at all.
+    # Max API calls: typically 2 (enhanced + fallback), up to 3 with auto-orientation.
+    logger.info("=" * 60)
+    logger.info("MULTI-ATTEMPT OCR STRATEGY")
+    logger.info("=" * 60)
 
-    # Re-encode preprocessed image to JPEG 95%
-    _, buffer = cv2.imencode('.jpg', preprocessed, [cv2.IMWRITE_JPEG_QUALITY, 95])
-    preprocessed_bytes = buffer.tobytes()
+    best_text = ""
+    best_label = ""
 
-    # Convert to base64 for Google Vision API
-    image_base64 = base64.b64encode(preprocessed_bytes).decode('utf-8')
+    # --- Attempt 1: Enhanced preprocessing (best for most passports) ---
+    enhanced = preprocess_enhanced(image)
+    text_enhanced = try_vision_api(enhanced, "enhanced 0°")
 
-    # === ATTEMPT 1: Preprocessed image ===
-    logger.info("Calling Google Cloud Vision API (preprocessed, 0°)...")
-    vision_response = call_google_vision_api(image_base64)
+    if text_enhanced and has_mrz_in_text(text_enhanced):
+        best_text = text_enhanced
+        best_label = "enhanced 0°"
+        logger.info("MRZ found with enhanced preprocessing — using this result")
+    elif text_enhanced:
+        best_text = text_enhanced
+        best_label = "enhanced 0°"
 
-    full_text = ""
-    if vision_response:
-        full_text = extract_text_from_vision_response(vision_response)
+    # --- Attempt 2: If no MRZ yet, try original image (sometimes preprocessing hurts) ---
+    if not has_mrz_in_text(best_text):
+        original_upscaled = upscale_image(image.copy(), 2000)
+        text_original = try_vision_api(original_upscaled, "original 0°")
 
-    # === AUTO-ORIENTATION: If no MRZ, try 180° ===
-    if full_text and not has_mrz_in_text(full_text):
-        logger.info("No MRZ detected at 0° — trying 180° rotation...")
-        image_180 = cv2.rotate(preprocessed, cv2.ROTATE_180)
-        _, buffer_180 = cv2.imencode('.jpg', image_180, [cv2.IMWRITE_JPEG_QUALITY, 95])
-        image_base64_180 = base64.b64encode(buffer_180.tobytes()).decode('utf-8')
+        if text_original and has_mrz_in_text(text_original):
+            best_text = text_original
+            best_label = "original 0°"
+            logger.info("MRZ found with original image — using this result")
+        elif text_original and len(text_original) > len(best_text):
+            best_text = text_original
+            best_label = "original 0°"
+            logger.info("Original image got more text — using this result")
 
-        vision_response_180 = call_google_vision_api(image_base64_180)
-        if vision_response_180:
-            full_text_180 = extract_text_from_vision_response(vision_response_180)
-            if full_text_180 and has_mrz_in_text(full_text_180):
-                logger.info("MRZ found at 180° — using rotated image")
-                full_text = full_text_180
-            elif full_text_180 and len(full_text_180) > len(full_text):
-                # Even without MRZ, use the orientation with more text
-                logger.info("180° has more text — using rotated result")
-                full_text = full_text_180
-            else:
-                logger.info("No MRZ at 180° either — keeping original orientation")
-    elif full_text:
-        logger.info("MRZ detected at 0° — orientation OK")
+    # --- Attempt 3: Auto-orientation — try 180° if still no MRZ ---
+    if best_text and not has_mrz_in_text(best_text):
+        logger.info("No MRZ at 0° — trying 180° rotation...")
+        # Use high-contrast variant for 180° attempt (covers dark/washed-out images)
+        high_contrast_180 = cv2.rotate(preprocess_high_contrast(image), cv2.ROTATE_180)
+        text_180 = try_vision_api(high_contrast_180, "high-contrast 180°")
 
-    # === ATTEMPT 2: Fallback to original (unprocessed) image if no text at all ===
+        if text_180 and has_mrz_in_text(text_180):
+            best_text = text_180
+            best_label = "high-contrast 180°"
+            logger.info("MRZ found at 180° with high-contrast — using this result")
+        elif text_180 and len(text_180) > len(best_text):
+            best_text = text_180
+            best_label = "high-contrast 180°"
+            logger.info("180° high-contrast got more text — using this result")
+
+    # --- Final fallback: if still no text, try high-contrast at 0° ---
+    if not best_text:
+        logger.info("No text yet — trying high-contrast at 0°...")
+        high_contrast = preprocess_high_contrast(image)
+        text_hc = try_vision_api(high_contrast, "high-contrast 0°")
+        if text_hc:
+            best_text = text_hc
+            best_label = "high-contrast 0°"
+
+    full_text = best_text
+    logger.info(f"Best result from: {best_label} ({len(full_text)} chars)")
+
     if not full_text:
-        logger.info("No text from preprocessed image — falling back to original image...")
-        _, orig_buffer = cv2.imencode('.jpg', original_image, [cv2.IMWRITE_JPEG_QUALITY, 95])
-        orig_base64 = base64.b64encode(orig_buffer.tobytes()).decode('utf-8')
-        vision_response = call_google_vision_api(orig_base64)
-        if vision_response:
-            full_text = extract_text_from_vision_response(vision_response)
-
-    if not full_text:
-        logger.error("No text extracted from image (tried preprocessed + original)")
+        logger.error("No text extracted from any preprocessing variant")
         return []
 
     results = []
