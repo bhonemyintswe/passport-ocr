@@ -17,7 +17,7 @@ import requests
 from .config import GOOGLE_CLOUD_VISION_API_KEY
 
 # Configure logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -1243,19 +1243,15 @@ def is_valid_nationality(nat: str) -> bool:
 def calculate_field_confidence(field_name: str, mrz_val: str, text_val: str, merged_val: str) -> float:
     """
     Score a single field 0.0-1.0 based on source and validation.
-    Conservative scoring — validation only checks format, not correctness.
-    - MRZ source + valid format = 0.60
-    - Text source + valid format = 0.40
-    - Cross-validation bonus (+0.15 if MRZ and text agree)
-    - MRZ invalid format = 0.25
-    - Text invalid format = 0.15
+    - MRZ source + valid = 0.80
+    - Text source + valid = 0.55
+    - Cross-validation bonus +0.10 (both sources agree)
+    - MRZ invalid = 0.40, Text invalid = 0.25
     - Empty = 0.0
-    Max possible per field = 0.75 (MRZ valid + cross-validated)
     """
     if not merged_val:
         return 0.0
 
-    # Determine validation based on field type
     def field_is_valid(val: str) -> bool:
         if not val:
             return False
@@ -1271,25 +1267,32 @@ def calculate_field_confidence(field_name: str, mrz_val: str, text_val: str, mer
             return is_valid_nationality(val)
         return bool(val)
 
-    score = 0.0
+    merged_valid = field_is_valid(merged_val)
 
-    # Base score from source — conservative, format validation != correctness
-    mrz_valid = field_is_valid(mrz_val)
-    text_valid = field_is_valid(text_val)
+    # Determine source: compare merged value against MRZ/text
+    # Apply OCR fix for name comparison (merged may have been OCR-corrected)
+    mrz_compare = mrz_val
+    if field_name in ('first_name', 'middle_name', 'last_name') and mrz_val:
+        mrz_compare = fix_mrz_name_ocr(mrz_val)
 
-    if mrz_val and merged_val == mrz_val:
-        score = 0.60 if mrz_valid else 0.25
-    elif text_val and merged_val == text_val:
-        score = 0.40 if text_valid else 0.15
+    from_mrz = bool(mrz_val) and (merged_val == mrz_val or merged_val == mrz_compare)
+    from_text = bool(text_val) and merged_val == text_val
+
+    # Base score from source
+    if from_mrz:
+        score = 0.80 if merged_valid else 0.40
+    elif from_text:
+        score = 0.55 if merged_valid else 0.25
     else:
-        score = 0.20
+        # Value exists but source unclear (e.g. cleaned/transformed)
+        score = 0.50 if merged_valid else 0.25
 
     # Cross-validation bonus: both sources independently agree
     if mrz_val and text_val:
-        mrz_norm = mrz_val.upper().strip()
+        mrz_norm = mrz_compare.upper().strip() if mrz_compare else ''
         text_norm = text_val.upper().strip()
         if mrz_norm == text_norm:
-            score = min(0.75, score + 0.15)
+            score = min(0.95, score + 0.10)
 
     return round(score, 2)
 
@@ -1297,33 +1300,41 @@ def calculate_field_confidence(field_name: str, mrz_val: str, text_val: str, mer
 def score_passport_confidence(merged: PassportData, mrz_data: Optional[PassportData], text_data: Optional[PassportData]) -> PassportData:
     """
     Score all key fields and compute overall confidence.
-    Updates merged PassportData with accurate confidence and low_confidence_fields.
+    Overall = average of extracted (non-empty) field scores.
+    Empty fields are tracked in low_confidence_fields but don't drag the average.
     """
     key_fields = ['first_name', 'last_name', 'passport_number', 'date_of_birth', 'gender', 'nationality']
 
     field_scores = {}
-    for field in key_fields:
-        merged_val = getattr(merged, field, '')
-        mrz_val = getattr(mrz_data, field, '') if mrz_data else ''
-        text_val = getattr(text_data, field, '') if text_data else ''
-        field_scores[field] = calculate_field_confidence(field, mrz_val, text_val, merged_val)
+    for fld in key_fields:
+        merged_val = getattr(merged, fld, '')
+        mrz_val = getattr(mrz_data, fld, '') if mrz_data else ''
+        text_val = getattr(text_data, fld, '') if text_data else ''
+        field_scores[fld] = calculate_field_confidence(fld, mrz_val, text_val, merged_val)
 
-    logger.info("FIELD CONFIDENCE SCORES:")
-    for field, score in field_scores.items():
-        logger.info(f"  {field}: {score}")
+    logger.info("Confidence: %s", {f: s for f, s in field_scores.items()})
 
-    # Overall confidence = average of ALL 6 key fields (including 0.0 for empty)
-    all_scores = list(field_scores.values())
-    overall = round(sum(all_scores) / len(all_scores), 2) if all_scores else 0.0
+    # Overall = average of non-zero scores (fields we actually extracted)
+    extracted = [s for s in field_scores.values() if s > 0]
+    empty_count = len(key_fields) - len(extracted)
 
-    # Low confidence fields = those scoring < 0.5
+    if extracted:
+        overall = round(sum(extracted) / len(extracted), 2)
+        # Completeness penalty: if many fields missing, reduce confidence
+        if empty_count >= 3:
+            overall = round(overall * 0.7, 2)
+        elif empty_count >= 2:
+            overall = round(overall * 0.85, 2)
+    else:
+        overall = 0.0
+
+    # Low confidence = empty fields + fields scoring below threshold
     low_conf = [f for f, s in field_scores.items() if s < 0.5]
 
     merged.confidence = overall
     merged.low_confidence_fields = low_conf
 
-    logger.info(f"  Overall confidence: {overall}")
-    logger.info(f"  Low confidence fields: {low_conf}")
+    logger.info(f"  Overall: {overall}, extracted: {len(extracted)}/6, low_conf: {low_conf}")
 
     return merged
 
@@ -1345,11 +1356,7 @@ def merge_passport_data(mrz_data: Optional[PassportData], text_data: Optional[Pa
     if not text_data:
         return mrz_data
 
-    logger.info("=" * 60)
-    logger.info("SMART MERGE: MRZ + TEXT EXTRACTION DATA")
-    logger.info("=" * 60)
-    logger.info(f"MRZ Data: first='{mrz_data.first_name}', last='{mrz_data.last_name}', pn='{mrz_data.passport_number}'")
-    logger.info(f"Text Data: first='{text_data.first_name}', last='{text_data.last_name}', pn='{text_data.passport_number}'")
+    logger.info(f"Merging: MRZ[{mrz_data.first_name} {mrz_data.last_name}] + Text[{text_data.first_name} {text_data.last_name}]")
 
     # --- Names: fix MRZ OCR errors first, then validate ---
     def choose_name(mrz_val: str, text_val: str, field_name: str) -> str:
@@ -1423,8 +1430,7 @@ def merge_passport_data(mrz_data: Optional[PassportData], text_data: Optional[Pa
     # Delegate confidence scoring
     merged = score_passport_confidence(merged, mrz_data, text_data)
 
-    logger.info(f"MERGED RESULT: {merged.first_name} {merged.last_name} - {merged.passport_number}")
-    logger.info("=" * 60)
+    logger.info(f"Merged: {merged.first_name} {merged.last_name} | {merged.passport_number} | conf={merged.confidence}")
 
     return merged
 
@@ -1594,9 +1600,7 @@ def process_passport_image(image_bytes: bytes, rotation_angle: float = 0) -> Lis
     2. TIER 2: Direct field extraction from text labels (fallback)
     3. Merge results: MRZ data + fill gaps from text extraction
     """
-    logger.info("=" * 60)
-    logger.info("PROCESSING PASSPORT IMAGE (TWO-TIER STRATEGY)")
-    logger.info("=" * 60)
+    logger.info("Processing passport image...")
 
     # Load image
     nparr = np.frombuffer(image_bytes, np.uint8)
@@ -1613,13 +1617,8 @@ def process_passport_image(image_bytes: bytes, rotation_angle: float = 0) -> Lis
         logger.info(f"Applying rotation: {rotation_angle} degrees")
         image = rotate_image_arbitrary(image, rotation_angle)
 
-    # === MULTI-ATTEMPT OCR STRATEGY ===
-    # Try multiple preprocessing variants, pick the best result.
-    # Priority: MRZ found > more text extracted > any text at all.
-    # Max API calls: typically 2 (enhanced + fallback), up to 3 with auto-orientation.
-    logger.info("=" * 60)
-    logger.info("MULTI-ATTEMPT OCR STRATEGY")
-    logger.info("=" * 60)
+    # Multi-attempt OCR: try preprocessing variants, pick best result
+    logger.info("Starting multi-attempt OCR...")
 
     best_text = ""
     best_label = ""
@@ -1684,10 +1683,8 @@ def process_passport_image(image_bytes: bytes, rotation_angle: float = 0) -> Lis
 
     results = []
 
-    # === TIER 1: MRZ PARSING ===
-    logger.info("=" * 60)
-    logger.info("TIER 1: MRZ PARSING")
-    logger.info("=" * 60)
+    # TIER 1: MRZ PARSING
+    logger.info("Tier 1: MRZ parsing...")
 
     mrz_pairs = find_mrz_lines(full_text)
     logger.info(f"Found {len(mrz_pairs)} MRZ pair(s)")
@@ -1704,15 +1701,12 @@ def process_passport_image(image_bytes: bytes, rotation_angle: float = 0) -> Lis
                 logger.warning(f"Failed to parse MRZ pair {i + 1}")
                 mrz_results.append(None)
 
-    # === TIER 2: DIRECT TEXT EXTRACTION ===
-    # Always try text extraction to fill gaps
-    logger.info("=" * 60)
-    logger.info("TIER 2: DIRECT TEXT EXTRACTION")
-    logger.info("=" * 60)
+    # TIER 2: Direct text extraction (fills gaps)
+    logger.info("Tier 2: Text extraction...")
 
     text_data = extract_fields_from_text(full_text)
 
-    # === MERGE RESULTS ===
+    # Merge results
     if mrz_results:
         # We have MRZ results - merge with text extraction to fill gaps
         for mrz_data in mrz_results:
@@ -1724,20 +1718,10 @@ def process_passport_image(image_bytes: bytes, rotation_angle: float = 0) -> Lis
         logger.info("Using TIER 2 text extraction results only")
         results.append(text_data)
 
-    # === FINAL OUTPUT ===
-    logger.info("=" * 60)
-    logger.info(f"FINAL RESULTS: {len(results)} passport(s) extracted")
-    logger.info("=" * 60)
-
+    # Final output
+    logger.info(f"Extracted {len(results)} passport(s)")
     for i, r in enumerate(results):
-        logger.info(f"  Passport {i + 1}:")
-        logger.info(f"    Name: {r.first_name} {r.middle_name} {r.last_name}")
-        logger.info(f"    Passport #: {r.passport_number}")
-        logger.info(f"    DOB: {r.date_of_birth}")
-        logger.info(f"    Gender: {r.gender}")
-        logger.info(f"    Nationality: {r.nationality}")
-        logger.info(f"    Confidence: {r.confidence}")
-        logger.info(f"    Low confidence fields: {r.low_confidence_fields}")
+        logger.info(f"  #{i+1}: {r.first_name} {r.last_name} | {r.passport_number} | conf={r.confidence}")
 
     # Helper to clean name - replace ALL hyphen-like characters with spaces
     def clean_name_output(name: str) -> str:
