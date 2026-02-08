@@ -265,19 +265,12 @@ async def export_to_excel(
     for i, passport in enumerate(passports):
         row = next_row + i
 
-        # Convert gender to Thai format
-        gender_thai = ""
-        if passport.gender == "M":
-            gender_thai = "ชาย"
-        elif passport.gender == "F":
-            gender_thai = "หญิง"
-
         # Column order: First Name, Middle Name, Last Name, Gender, Passport No., Nationality, Birth Date, Checkout Date, Phone No.
         data = [
             passport.first_name,
             passport.middle_name,
             passport.last_name,
-            gender_thai,
+            passport.gender,
             passport.passport_number,
             passport.nationality,
             passport.date_of_birth,
