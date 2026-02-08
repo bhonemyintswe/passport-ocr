@@ -5,6 +5,7 @@ function DataTable({ passports, setPassports, onBack }) {
   const [exporting, setExporting] = useState(false);
   const [editingCell, setEditingCell] = useState(null);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const fileInputRef = useRef(null);
 
   // Resizable panel state
   const [leftPanelWidth, setLeftPanelWidth] = useState(60);
@@ -177,48 +178,75 @@ function DataTable({ passports, setPassports, onBack }) {
     }
   };
 
+  const preparePassports = () => passports.map(p => ({
+    ...p,
+    first_name: (p.first_name || '').toUpperCase(),
+    middle_name: (p.middle_name || '').toUpperCase(),
+    last_name: (p.last_name || '').toUpperCase(),
+    checkout_date: p.checkout_date || '',
+    phone_number: p.phone_number || '',
+  }));
+
   const handleExportClick = async () => {
     if (passports.length === 0) {
       alert('No data to export.');
       return;
     }
 
-    try {
-      // Open file picker using File System Access API
-      const [fileHandle] = await window.showOpenFilePicker({
-        types: [{
-          description: 'Excel Files',
-          accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] },
-        }],
-      });
-
-      const uppercasePassports = passports.map(p => ({
-        ...p,
-        first_name: (p.first_name || '').toUpperCase(),
-        middle_name: (p.middle_name || '').toUpperCase(),
-        last_name: (p.last_name || '').toUpperCase(),
-        checkout_date: p.checkout_date || '',
-        phone_number: p.phone_number || '',
-      }));
-
-      setExporting(true);
+    // Try File System Access API first (Chrome/Edge, allows writing back to same file)
+    if (window.showOpenFilePicker) {
       try {
-        await exportToExcel(uppercasePassports, fileHandle);
-        alert('Data added to Excel file successfully!');
-      } catch (err) {
-        if (err.name === 'NoModificationAllowedError' || err.message?.includes('locked') || err.message?.includes('state')) {
-          alert('Cannot write to file. Please close the Excel file first, then try again.');
-        } else {
-          alert('Failed to export data. Please try again.');
+        const [fileHandle] = await window.showOpenFilePicker({
+          types: [{
+            description: 'Excel Files',
+            accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] },
+          }],
+        });
+
+        const file = await fileHandle.getFile();
+        setExporting(true);
+        try {
+          const result = await exportToExcel(preparePassports(), file, fileHandle);
+          if (result === 'saved') {
+            alert('Data added to Excel file successfully!');
+          } else {
+            alert('Data added! Modified file has been downloaded.');
+          }
+        } catch (err) {
+          if (err.message?.includes('locked') || err.message?.includes('state')) {
+            alert('Cannot write to file. Please close the Excel file first, then try again.');
+          } else {
+            alert('Failed to export data. Please try again.');
+          }
+        } finally {
+          setExporting(false);
         }
-      } finally {
-        setExporting(false);
+        return;
+      } catch (err) {
+        if (err.name === 'AbortError') return; // User cancelled
+        // Fall through to file input fallback
+      }
+    }
+
+    // Fallback: use traditional file input
+    fileInputRef.current.click();
+  };
+
+  const handleFileInputChange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    e.target.value = '';
+
+    setExporting(true);
+    try {
+      const result = await exportToExcel(preparePassports(), file, null);
+      if (result === 'downloaded') {
+        alert('Data added! Modified file has been downloaded.');
       }
     } catch (err) {
-      // User cancelled file picker
-      if (err.name !== 'AbortError') {
-        alert('File picker not supported. Please use Chrome or Edge.');
-      }
+      alert('Failed to export data. Please try again.');
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -292,6 +320,13 @@ function DataTable({ passports, setPassports, onBack }) {
             </svg>
             Clear All
           </button>
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleFileInputChange}
+            accept=".xlsx"
+            className="hidden"
+          />
           <button
             onClick={handleExportClick}
             disabled={exporting || passports.length === 0}

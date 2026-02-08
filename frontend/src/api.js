@@ -56,9 +56,7 @@ export const processPassports = async (files) => {
   return response.data;
 };
 
-export const exportToExcel = async (passports, fileHandle) => {
-  // Read file content into memory immediately to avoid stale state errors
-  const file = await fileHandle.getFile();
+export const exportToExcel = async (passports, file, fileHandle) => {
   const fileBuffer = await file.arrayBuffer();
 
   const formData = new FormData();
@@ -70,10 +68,30 @@ export const exportToExcel = async (passports, fileHandle) => {
     responseType: 'arraybuffer',
   });
 
-  // Write the modified file back to the same file on disk
-  const writable = await fileHandle.createWritable();
-  await writable.write(response.data);
-  await writable.close();
+  // Try to write back to the same file (File System Access API)
+  if (fileHandle) {
+    try {
+      const writable = await fileHandle.createWritable();
+      await writable.write(response.data);
+      await writable.close();
+      return 'saved';
+    } catch {
+      // Fall through to download
+    }
+  }
+
+  // Fallback: download the modified file
+  const url = window.URL.createObjectURL(new Blob([response.data], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.setAttribute('download', file.name);
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.URL.revokeObjectURL(url);
+  return 'downloaded';
 };
 
 export default api;
