@@ -56,33 +56,24 @@ export const processPassports = async (files) => {
   return response.data;
 };
 
-export const exportToExcel = async (passports) => {
-  const response = await api.post(
-    '/api/export',
-    { passports },
-    { responseType: 'blob' }
-  );
+export const exportToExcel = async (passports, fileHandle) => {
+  // Read file content into memory immediately to avoid stale state errors
+  const file = await fileHandle.getFile();
+  const fileBuffer = await file.arrayBuffer();
 
-  // Create download link
-  const url = window.URL.createObjectURL(new Blob([response.data]));
-  const link = document.createElement('a');
-  link.href = url;
+  const formData = new FormData();
+  formData.append('excel_file', new File([fileBuffer], file.name, { type: file.type }));
+  formData.append('passports_json', JSON.stringify(passports));
 
-  // Get filename from response headers or generate one
-  const contentDisposition = response.headers['content-disposition'];
-  let filename = 'passport_data.xlsx';
-  if (contentDisposition) {
-    const match = contentDisposition.match(/filename=(.+)/);
-    if (match) {
-      filename = match[1].replace(/"/g, '');
-    }
-  }
+  const response = await api.post('/api/export', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    responseType: 'arraybuffer',
+  });
 
-  link.setAttribute('download', filename);
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  window.URL.revokeObjectURL(url);
+  // Write the modified file back to the same file on disk
+  const writable = await fileHandle.createWritable();
+  await writable.write(response.data);
+  await writable.close();
 };
 
 export default api;

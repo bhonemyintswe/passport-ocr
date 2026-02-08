@@ -114,12 +114,12 @@ function DataTable({ passports, setPassports, onBack }) {
 
   const columns = [
     { key: 'first_name', label: 'First Name', width: 'w-24' },
-    { key: 'middle_name', label: 'Middle', width: 'w-20' },
+    { key: 'middle_name', label: 'Middle Name', width: 'w-20' },
     { key: 'last_name', label: 'Last Name', width: 'w-24' },
-    { key: 'gender', label: 'Sex', width: 'w-12' },
-    { key: 'date_of_birth', label: 'DOB', width: 'w-24' },
-    { key: 'nationality', label: 'Nat.', width: 'w-14' },
+    { key: 'gender', label: 'Gender', width: 'w-12' },
     { key: 'passport_number', label: 'Passport No.', width: 'w-28' },
+    { key: 'nationality', label: 'Nationality', width: 'w-14' },
+    { key: 'date_of_birth', label: 'Birth Date', width: 'w-24' },
     { key: 'checkout_date', label: 'Checkout Date', width: 'w-28' },
     { key: 'phone_number', label: 'Phone Number', width: 'w-28' },
   ];
@@ -177,28 +177,48 @@ function DataTable({ passports, setPassports, onBack }) {
     }
   };
 
-  const handleExport = async () => {
+  const handleExportClick = async () => {
     if (passports.length === 0) {
       alert('No data to export.');
       return;
     }
 
-    const uppercasePassports = passports.map(p => ({
-      ...p,
-      first_name: (p.first_name || '').toUpperCase(),
-      middle_name: (p.middle_name || '').toUpperCase(),
-      last_name: (p.last_name || '').toUpperCase(),
-      checkout_date: p.checkout_date || '',
-      phone_number: p.phone_number || '',
-    }));
-
-    setExporting(true);
     try {
-      await exportToExcel(uppercasePassports);
+      // Open file picker using File System Access API
+      const [fileHandle] = await window.showOpenFilePicker({
+        types: [{
+          description: 'Excel Files',
+          accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] },
+        }],
+      });
+
+      const uppercasePassports = passports.map(p => ({
+        ...p,
+        first_name: (p.first_name || '').toUpperCase(),
+        middle_name: (p.middle_name || '').toUpperCase(),
+        last_name: (p.last_name || '').toUpperCase(),
+        checkout_date: p.checkout_date || '',
+        phone_number: p.phone_number || '',
+      }));
+
+      setExporting(true);
+      try {
+        await exportToExcel(uppercasePassports, fileHandle);
+        alert('Data added to Excel file successfully!');
+      } catch (err) {
+        if (err.name === 'NoModificationAllowedError' || err.message?.includes('locked') || err.message?.includes('state')) {
+          alert('Cannot write to file. Please close the Excel file first, then try again.');
+        } else {
+          alert('Failed to export data. Please try again.');
+        }
+      } finally {
+        setExporting(false);
+      }
     } catch (err) {
-      alert('Failed to export data. Please try again.');
-    } finally {
-      setExporting(false);
+      // User cancelled file picker
+      if (err.name !== 'AbortError') {
+        alert('File picker not supported. Please use Chrome or Edge.');
+      }
     }
   };
 
@@ -273,7 +293,7 @@ function DataTable({ passports, setPassports, onBack }) {
             Clear All
           </button>
           <button
-            onClick={handleExport}
+            onClick={handleExportClick}
             disabled={exporting || passports.length === 0}
             className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition flex items-center gap-2"
           >
@@ -288,9 +308,9 @@ function DataTable({ passports, setPassports, onBack }) {
             ) : (
               <>
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 13h6m-3-3v6m5 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                 </svg>
-                Export to Excel
+                Add to Excel File
               </>
             )}
           </button>

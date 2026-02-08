@@ -4,8 +4,8 @@ Extracts passport data from scanned images using OCR.
 """
 
 import io
+import json
 import base64
-from datetime import datetime
 from typing import List
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Form
@@ -14,7 +14,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from PIL import Image
 import openpyxl
-from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+from openpyxl.styles import Alignment, Border, Side
 
 from .config import CORS_ORIGINS
 from .auth import verify_password, create_access_token, verify_token
@@ -69,10 +69,6 @@ class OCRResponse(BaseModel):
     success: bool
     passports: List[PassportData]
     message: str = ""
-
-
-class ExportRequest(BaseModel):
-    passports: List[PassportData]
 
 
 # Routes
@@ -228,19 +224,27 @@ def create_preview_image(image_bytes: bytes, max_size: int = 800) -> str:
 
 @app.post("/api/export")
 async def export_to_excel(
-    request: ExportRequest,
+    excel_file: UploadFile = File(...),
+    passports_json: str = Form(...),
     _: dict = Depends(verify_token)
 ):
-    """Export passport data to Excel file in Thai immigration format."""
-    # Create workbook
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Passport Data"
+    """Append passport data to an existing Excel file."""
+    # Parse passport data from JSON string
+    try:
+        passports_raw = json.loads(passports_json)
+        passports = [PassportData(**p) for p in passports_raw]
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid passport data: {e}")
 
-    # Define styles
-    header_font = Font(bold=True, color="FFFFFF")
-    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-    header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    # Load the uploaded Excel file
+    try:
+        file_content = await excel_file.read()
+        wb = openpyxl.load_workbook(io.BytesIO(file_content))
+        ws = wb.active
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Cannot read Excel file: {e}")
+
+    # Define styles for new rows
     thin_border = Border(
         left=Side(style='thin'),
         right=Side(style='thin'),
@@ -248,31 +252,18 @@ async def export_to_excel(
         bottom=Side(style='thin')
     )
 
-    # Thai immigration template headers (exact format)
-    headers = [
-        "ชื่อ\nFirst Name *",
-        "ชื่อกลาง\nMiddle Name",
-        "นามสกุล\nLast Name",
-        "เพศ\nGender *",
-        "เลขหนังสือเดินทาง\nPassport No. *",
-        "สัญชาติ\nNationality *",
-        "วัน เดือน ปี เกิด\nBirth Date\nDD/MM/YYYY(ค.ศ. / A.D.) \nเช่น 17/06/1985 หรือ 10/00/1985 หรือ 00/00/1985",
-        "วันที่แจ้งออกจากที่พัก\nCheck-out Date\nDD/MM/YYYY(ค.ศ. / A.D.) \nเช่น 14/06/2023",
-        "เบอร์โทรศัพท์\nPhone No."
-    ]
+    # Find the actual next empty row by scanning column A (First Name)
+    # ws.max_row can be inflated by empty formatted rows in templates
+    next_row = 2  # Start after header row
+    for row_idx in range(2, ws.max_row + 2):
+        cell_value = ws.cell(row=row_idx, column=1).value
+        if cell_value is None or str(cell_value).strip() == "":
+            next_row = row_idx
+            break
+    # Append data rows
+    for i, passport in enumerate(passports):
+        row = next_row + i
 
-    for col, header in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col, value=header)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = header_alignment
-        cell.border = thin_border
-
-    # Set header row height to accommodate multi-line headers
-    ws.row_dimensions[1].height = 80
-
-    # Data rows
-    for row, passport in enumerate(request.passports, 2):
         # Convert gender to Thai format
         gender_thai = ""
         if passport.gender == "M":
@@ -280,6 +271,7 @@ async def export_to_excel(
         elif passport.gender == "F":
             gender_thai = "หญิง"
 
+        # Column order: First Name, Middle Name, Last Name, Gender, Passport No., Nationality, Birth Date, Checkout Date, Phone No.
         data = [
             passport.first_name,
             passport.middle_name,
@@ -288,32 +280,26 @@ async def export_to_excel(
             passport.passport_number,
             passport.nationality,
             passport.date_of_birth,
-            passport.checkout_date,  # Check-out Date from UI input
-            passport.phone_number    # Phone No. from UI input
+            passport.checkout_date,
+            passport.phone_number
         ]
         for col, value in enumerate(data, 1):
             cell = ws.cell(row=row, column=col, value=value)
             cell.border = thin_border
             cell.alignment = Alignment(horizontal="left", vertical="center")
 
-    # Adjust column widths for Thai immigration template
-    column_widths = [18, 15, 20, 12, 20, 15, 25, 25, 18]
-    for col, width in enumerate(column_widths, 1):
-        ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = width
-
     # Save to buffer
     buffer = io.BytesIO()
     wb.save(buffer)
     buffer.seek(0)
 
-    # Generate filename with timestamp
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    filename = f"passport_data_{timestamp}.xlsx"
+    # Return the modified file with original filename
+    original_filename = excel_file.filename or "passport_data.xlsx"
 
     return StreamingResponse(
         buffer,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
+        headers={"Content-Disposition": f"attachment; filename={original_filename}"}
     )
 
 
